@@ -1,0 +1,81 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # Check every 3 hours
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/volcengine/OpenViking.git
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Check for new commits
+        id: check
+        run: |
+          NEW_COMMITS=$(git log main..upstream/main --oneline)
+          if [ -z "$NEW_COMMITS" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "No new upstream commits."
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+            COMMIT_COUNT=$(git rev-list --count main..upstream/main)
+            echo "count=$COMMIT_COUNT" >> "$GITHUB_OUTPUT"
+            {
+              echo "log<<EOF"
+              git log main..upstream/main --oneline --no-decorate
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fast-forward main
+        if: steps.check.outputs.up_to_date == 'false'
+        run: |
+          git merge --ff-only upstream/main
+          git push origin main
+
+      - name: Open issue to rebase custom
+        if: steps.check.outputs.up_to_date == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const count = '${{ steps.check.outputs.count }}';
+            const log = `${{ steps.check.outputs.log }}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🔄 Upstream updated — ${count} new commit(s), rebase custom`,
+              body: [
+                '`main` has been auto-synced with upstream.',
+                '',
+                '### New commits',
+                '```',
+                log,
+                '```',
+                '',
+                '### Action needed',
+                '```bash',
+                'git checkout custom',
+                'git rebase main',
+                'git push --force-with-lease origin custom',
+                '```',
+              ].join('\n'),
+              labels: ['upstream-sync'],
+            });
